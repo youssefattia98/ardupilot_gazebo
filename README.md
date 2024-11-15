@@ -20,4 +20,5 @@ sudo make install
 cd 
 nano .bashrc
 source /usr/share/gazebo/setup.sh
+export GAZEBO_PLUGIN_PATH=~{path to ardupilot_gazebo}/ardupilot_gazebo/build:${GAZEBO_PLUGIN_PATH}
 ````

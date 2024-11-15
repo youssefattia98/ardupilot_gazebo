@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
 
+# Set specific GCC version for C and C++
+set(CMAKE_C_COMPILER "/usr/bin/gcc-9")
+set(CMAKE_CXX_COMPILER "/usr/bin/g++-9")
 
 project(ardupilot_sitl_gazebo)
-
 
 #######################
 ## Find Dependencies ##

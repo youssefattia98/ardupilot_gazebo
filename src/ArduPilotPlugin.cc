@@ -1215,125 +1215,112 @@ void ArduPilotPlugin::ReceiveMotorCommand()
     }
   }
 }
-
-/////////////////////////////////////////////////
 void ArduPilotPlugin::SendState() const
 {
-  // send_fdm
+  //--------------------------------------------------------------------------
+  // 1) Prepare an fdm packet
+  //--------------------------------------------------------------------------
   fdmPacket pkt;
-
   pkt.timestamp = this->dataPtr->model->GetWorld()->SimTime().Double();
 
-  // asssumed that the imu orientation is:
-  //   x forward
-  //   y right
-  //   z down
+  //--------------------------------------------------------------------------
+  // 2) Define transforms: NWU -> NED, and NWU -> FRD
+  //
+  //   NWU = +X north, +Y west, +Z up
+  //   NED = +X north, +Y east, +Z down
+  //   FRD = +X fwd,   +Y right, +Z down
+  //
+  //   => NWU -> NED:  roll = π about X flips Y and Z
+  //   => NWU -> FRD:  also roll = π about X if the body frame is NWU
+  //--------------------------------------------------------------------------
+  const ignition::math::Pose3d nwuToNed(
+      0, 0, 0,     // no xyz offset
+      IGN_PI,      // roll = 180 deg
+      0.0,         // pitch
+      0.0          // yaw
+  );
 
-  // get linear acceleration in body frame
-  const ignition::math::Vector3d linearAccel =
-    this->dataPtr->imuSensor->LinearAcceleration();
+  const ignition::math::Pose3d nwuToFrd(
+      0, 0, 0,
+      IGN_PI,  // roll=180 deg
+      0.0,
+      0.0
+  );
 
-  // copy to pkt
-  pkt.imuLinearAccelerationXYZ[0] = linearAccel.X();
-  pkt.imuLinearAccelerationXYZ[1] = linearAccel.Y();
-  pkt.imuLinearAccelerationXYZ[2] = linearAccel.Z();
-  // gzerr << "lin accel [" << linearAccel << "]\n";
+  //--------------------------------------------------------------------------
+  // 3) IMU data: Rotate from NWU -> FRD
+  //--------------------------------------------------------------------------
+  ignition::math::Vector3d accelNwu = this->dataPtr->imuSensor->LinearAcceleration();
+  ignition::math::Vector3d gyroNwu  = this->dataPtr->imuSensor->AngularVelocity();
 
-  // get angular velocity in body frame
-  const ignition::math::Vector3d angularVel =
-    this->dataPtr->imuSensor->AngularVelocity();
+  ignition::math::Vector3d accelFrd = nwuToFrd.Rot().RotateVector(accelNwu);
+  ignition::math::Vector3d gyroFrd  = nwuToFrd.Rot().RotateVector(gyroNwu);
 
-  // copy to pkt
-  pkt.imuAngularVelocityRPY[0] = angularVel.X();
-  pkt.imuAngularVelocityRPY[1] = angularVel.Y();
-  pkt.imuAngularVelocityRPY[2] = angularVel.Z();
+  pkt.imuLinearAccelerationXYZ[0] = accelFrd.X();
+  pkt.imuLinearAccelerationXYZ[1] = accelFrd.Y();
+  pkt.imuLinearAccelerationXYZ[2] = accelFrd.Z();
 
-  // get inertial pose and velocity
-  // position of the uav in world frame
-  // this position is used to calcualte bearing and distance
-  // from starting location, then use that to update gps position.
-  // The algorithm looks something like below (from ardupilot helper
-  // libraries):
-  //   bearing = to_degrees(atan2(position.y, position.x));
-  //   distance = math.sqrt(self.position.x**2 + self.position.y**2)
-  //   (self.latitude, self.longitude) = util.gps_newpos(
-  //    self.home_latitude, self.home_longitude, bearing, distance)
-  // where xyz is in the NED directions.
-  // Gazebo world xyz is assumed to be N, -E, -D, so flip some stuff
-  // around.
-  // orientation of the uav in world NED frame -
-  // assuming the world NED frame has xyz mapped to NED,
-  // imuLink is NED - z down
+  pkt.imuAngularVelocityRPY[0] = gyroFrd.X();
+  pkt.imuAngularVelocityRPY[1] = gyroFrd.Y();
+  pkt.imuAngularVelocityRPY[2] = gyroFrd.Z();
 
-  // model world pose brings us to model,
-  // which for example zephyr has -y-forward, x-left, z-up
-  // adding modelXYZToAirplaneXForwardZDown rotates
-  //   from: model XYZ
-  //   to: airplane x-forward, y-left, z-down
-  const ignition::math::Pose3d gazeboXYZToModelXForwardZDown =
-    this->modelXYZToAirplaneXForwardZDown +
-    this->dataPtr->model->WorldPose();
+  //--------------------------------------------------------------------------
+  // 4) Pose & Orientation: ArduPilot wants (NED world) -> (FRD body).
+  //
+  // We have:
+  //   - worldNwu_to_modelNwu = model->WorldPose()  (the base link in NWU)
+  //   - nwuToNed (fixed transform NWU->NED)
+  //   - nwuToFrd (fixed transform NWU->FRD)
+  //
+  // We'll form:
+  //   worldNed_to_bodyFrd =
+  //      (worldNed_to_worldNwu)
+  //    * (worldNwu_to_modelNwu)
+  //    * (modelNwu_to_bodyFrd)
+  //
+  // where:
+  //   worldNwu_to_worldNed = nwuToNed
+  //   worldNed_to_worldNwu = inverse of that
+  //   modelNwu_to_bodyFrd  = nwuToFrd
+  //--------------------------------------------------------------------------
+  ignition::math::Pose3d worldNwu_to_modelNwu = this->dataPtr->model->WorldPose();
 
-  // get transform from world NED to Model frame
-  const ignition::math::Pose3d NEDToModelXForwardZUp =
-    gazeboXYZToModelXForwardZDown - this->gazeboXYZToNED;
+  ignition::math::Pose3d worldNwu_to_worldNed = nwuToNed;
+  ignition::math::Pose3d worldNed_to_worldNwu = worldNwu_to_worldNed.Inverse();
 
-  // gzerr << "ned to model [" << NEDToModelXForwardZUp << "]\n";
+  ignition::math::Pose3d modelNwu_to_bodyFrd  = nwuToFrd;
 
-  // N
-  pkt.positionXYZ[0] = NEDToModelXForwardZUp.Pos().X();
+  ignition::math::Pose3d worldNed_to_bodyFrd =
+       worldNed_to_worldNwu
+    *  worldNwu_to_modelNwu
+    *  modelNwu_to_bodyFrd;
 
-  // E
-  pkt.positionXYZ[1] = NEDToModelXForwardZUp.Pos().Y();
+  // Position in NED
+  pkt.positionXYZ[0] = worldNed_to_bodyFrd.Pos().X();  // N
+  pkt.positionXYZ[1] = worldNed_to_bodyFrd.Pos().Y();  // E
+  pkt.positionXYZ[2] = worldNed_to_bodyFrd.Pos().Z();  // D
 
-  // D
-  pkt.positionXYZ[2] = NEDToModelXForwardZUp.Pos().Z();
+  // Orientation from NED -> FRD
+  pkt.imuOrientationQuat[0] = worldNed_to_bodyFrd.Rot().W();
+  pkt.imuOrientationQuat[1] = worldNed_to_bodyFrd.Rot().X();
+  pkt.imuOrientationQuat[2] = worldNed_to_bodyFrd.Rot().Y();
+  pkt.imuOrientationQuat[3] = worldNed_to_bodyFrd.Rot().Z();
 
-  // imuOrientationQuat is the rotation from world NED frame
-  // to the uav frame.
-  pkt.imuOrientationQuat[0] = NEDToModelXForwardZUp.Rot().W();
-  pkt.imuOrientationQuat[1] = -NEDToModelXForwardZUp.Rot().X();
-  pkt.imuOrientationQuat[2] = NEDToModelXForwardZUp.Rot().Y();
-  pkt.imuOrientationQuat[3] = -NEDToModelXForwardZUp.Rot().Z();
+  //--------------------------------------------------------------------------
+  // 5) Velocity in NED: rotate Gazebo NWU velocity -> NED
+  //--------------------------------------------------------------------------
+  ignition::math::Vector3d velNwu =
+      this->dataPtr->model->GetLink()->WorldLinearVel();
 
-  // gzdbg << "imu [" << gazeboXYZToModelXForwardZDown.rot.GetAsEuler()
-  //       << "]\n";
-  // gzdbg << "ned [" << this->gazeboXYZToNED.rot.GetAsEuler() << "]\n";
-  // gzdbg << "rot [" << NEDToModelXForwardZUp.rot.GetAsEuler() << "]\n";
+  ignition::math::Vector3d velNed =
+      nwuToNed.Rot().RotateVector(velNwu); // NWU->NED
 
-  // Get NED velocity in body frame *
-  // or...
-  // Get model velocity in NED frame
-  const ignition::math::Vector3d velGazeboWorldFrame =
-    this->dataPtr->model->GetLink()->WorldLinearVel();
-  const ignition::math::Vector3d velNEDFrame =
-    this->gazeboXYZToNED.Rot().RotateVectorReverse(velGazeboWorldFrame);
-  pkt.velocityXYZ[0] = velNEDFrame.X();
-  pkt.velocityXYZ[1] = velNEDFrame.Y();
-  pkt.velocityXYZ[2] = velNEDFrame.Z();
-/* NOT MERGED IN MASTER YET
-  if (!this->dataPtr->gpsSensor)
-    {
+  pkt.velocityXYZ[0] = velNed.X();
+  pkt.velocityXYZ[1] = velNed.Y();
+  pkt.velocityXYZ[2] = velNed.Z();
 
-    }
-    else {
-        pkt.longitude = this->dataPtr->gpsSensor->Longitude().Degree();
-        pkt.latitude = this->dataPtr->gpsSensor->Latitude().Degree();
-        pkt.altitude = this->dataPtr->gpsSensor->Altitude();
-    }
-    
-    // TODO : make generic enough to accept sonar/gpuray etc. too
-    if (!this->dataPtr->rangefinderSensor)
-    {
-
-    } else {
-        // Rangefinder value can not be send as Inf to ardupilot
-        const double range = this->dataPtr->rangefinderSensor->Range(0);
-        pkt.rangefinder = std::isinf(range) ? 0.0 : range;
-    }
-    
-  // airspeed :     wind = Vector3(environment.wind.x, environment.wind.y, environment.wind.z)
-   // pkt.airspeed = (pkt.velocity - wind).length()
-*/
+  //--------------------------------------------------------------------------
+  // 6) Send fdmPacket back to ArduPilot
+  //--------------------------------------------------------------------------
   this->dataPtr->socket_out.Send(&pkt, sizeof(pkt));
 }

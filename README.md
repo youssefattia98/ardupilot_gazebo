@@ -10,7 +10,6 @@ After cloning this pkg:
 
 ````
 cd ardupilot_gazebo
-git checkout add_link
 mkdir build
 cd build
 sudo make install
